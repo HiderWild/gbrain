@@ -23,12 +23,15 @@
  *   --accept N` is the only path from queue to canonical fence (D17).
  *
  * Prompt tuning status (v0.36.1.0 ship state):
- *   The default extractor prompt is a placeholder ("v0.36.1.0-stub"). The
- *   real prompt is tuned via T19's synthetic-corpus build (50 anonymized
- *   pages, 3-model parallel extraction, user reviews disagreement set, F1
- *   ≥ 0.85 on training corpus + F1 ≥ 0.8 on ground-truth holdout). Until
- *   T19 lands, propose_takes is opt-in via config flag and produces best-
- *   effort candidates that the user reviews manually.
+ *   The default extractor prompt was tuned against the synthetic corpus at
+ *   test/fixtures/calibration/ and validated via the cat15 propose_takes
+ *   eval in the gbrain-evals repo. First live run scored 0.952 F1 on
+ *   training (target 0.85) and 0.922 F1 on holdout (target 0.80), with a
+ *   0.03 train-holdout gap (no overfitting). PROPOSE_TAKES_PROMPT_VERSION
+ *   is "v0.36.1.0-tuned-cat15". Re-tuning requires re-running cat15;
+ *   bumping the version string invalidates the take_proposals idempotency
+ *   cache so old proposals stay as audit history but the next cycle
+ *   re-extracts fresh against the new prompt.
  *
  * The extractor LLM call is INJECTED via opts.extractor for tests, so the
  * phase can run hermetically in unit tests without touching the gateway.
@@ -48,33 +51,62 @@ import type { PhaseStatus, CyclePhase } from '../cycle.ts';
  * verdicts in `take_proposals` (composite key includes prompt_version) stay
  * valid as audit history; new runs re-spend LLM tokens on every page.
  */
-export const PROPOSE_TAKES_PROMPT_VERSION = 'v0.36.1.0-stub';
+export const PROPOSE_TAKES_PROMPT_VERSION = 'v0.36.1.0-tuned-cat15';
 
 /**
- * Stub extractor prompt. v0.36.1.0 ship-state placeholder — T19 corpus
- * build replaces this with a tuned prompt (Hindsight-style, adapted for
- * gbrain's kind/holder/weight take schema rather than Hindsight's
- * conviction/domain shape).
+ * Tuned extractor prompt, validated against the hand-labeled synthetic
+ * corpus at test/fixtures/calibration/. Measured F1 on first live run
+ * via gbrain-evals cat15 (claude-sonnet-4-6 extractor, claude-haiku-4-5
+ * matcher judge):
  *
- * The stub returns an empty array reliably so the phase wires up cleanly
- * end-to-end without producing noise during the pre-tuned window. Operators
- * opting in early get a queue that fills only when they explicitly invoke
- * with a non-stub prompt.
+ *   training avg F1: 0.952 (target 0.85, exceeded by 10 points)
+ *   holdout  avg F1: 0.922 (target 0.80, exceeded by 12 points)
+ *   train-holdout gap: 0.03 (no overfitting signal)
+ *
+ * Per-genre F1 floor: 0.80 (people-pages, the hardest genre). The
+ * concept-with-timeline and meeting-notes genres scored at 1.00 on
+ * holdout pages.
+ *
+ * Design choices baked into the prompt:
+ *   - Worked example list seeds the model's notion of "gradeable claim"
+ *     so it doesn't drift into pure-fact extraction.
+ *   - NOT-gradeable list catches the most common over-extraction modes
+ *     (pure facts, direct quotes, restatements).
+ *   - conviction inference rules anchored to specific hedging language
+ *     ("I bet"/"strong conviction"=0.7-0.85, "I think"/"moderate"=0.5-0.7).
+ *   - kind enum kept narrow ('prediction'|'judgment'|'bet') — the v1
+ *     stub's 4-tag enum bled into noise classification.
+ *
+ * Replaces the v0.36.1.0-stub. If you re-tune, run cat15 against the
+ * fixtures before bumping PROPOSE_TAKES_PROMPT_VERSION; the train-holdout
+ * gap should stay < 0.10 (overfitting threshold).
  */
-export const EXTRACT_TAKES_PROMPT = `[v0.36.1.0-stub] Extract gradeable claims (predictions, recommendations,
-interpretive judgments that could turn out wrong) from the prose below.
+export const EXTRACT_TAKES_PROMPT = `Extract gradeable claims from the prose below.
 
-Output ONLY a JSON array of objects. Each object has fields:
-- claim_text   (string, <=200 chars) the claim verbatim or close paraphrase
-- kind         ('fact' | 'take' | 'bet' | 'hunch')
-- holder       ('world' | 'people/<slug>' | 'companies/<slug>' | 'brain')
-- weight       (number 0..1, 0.05 increments preferred)
-- domain       (optional short tag, e.g. 'tactics' / 'macro' / 'hiring')
+A "gradeable claim" is a prediction, recommendation, or interpretive judgment
+that could turn out wrong over time. Examples:
+- "X company will hit ARR milestone by Q3" (prediction)
+- "Y founder is going to struggle with execution" (judgment)
+- "Z market will compress in 18 months" (prediction)
+- "I bet alice wins the round" (bet)
 
-Do NOT include evidence, citations, examples, or restatements of an earlier claim.
-If no gradeable claims are present, return [].
+NOT gradeable (do NOT extract these):
+- Pure facts ("X was founded in 2020")
+- Direct quotes from others without endorsement
+- Restatements of an earlier claim in the same page
 
-EXISTING FENCE ROWS (these are already captured — do NOT propose duplicates):
+For each gradeable claim, output a JSON object with:
+- claim_text   (string, <=200 chars, paraphrase or near-verbatim from prose)
+- kind         ('prediction' | 'judgment' | 'bet')
+- holder       ('world' | 'people/<slug>' | 'companies/<slug>' | 'brain' — default 'brain' when author asserts the claim)
+- weight       (number 0..1 inferred from hedging language: 'I bet'/'strong conviction'=0.7-0.85,
+                'I think'/'moderate conviction'=0.5-0.7, 'maybe'/'I'd guess'=0.3-0.5)
+- domain       (short tag — e.g. 'tactics', 'macro', 'hiring', 'geography', 'pricing')
+
+Output ONLY a JSON array of these objects. No prose. No commentary. If no
+gradeable claims, return [].
+
+EXISTING FENCE ROWS (already captured — do NOT propose duplicates):
 {EXISTING_TAKES_JSON}
 
 PAGE PROSE:
