@@ -118,6 +118,9 @@ export async function runSkillpack(args: string[]): Promise<void> {
     case 'registry':
       await cmdRegistry(rest);
       return;
+    case 'doctor':
+      await cmdDoctor(rest);
+      return;
     case 'install':
       console.error(
         "Error: 'gbrain skillpack install' was removed in v0.33. Use 'gbrain skillpack scaffold <name>' instead.\n" +
@@ -926,6 +929,54 @@ async function cmdRegistry(args: string[]): Promise<void> {
     console.error(`Currently configured registry: ${url}`);
     process.exit(2);
   }
+}
+
+// ---------------------------------------------------------------------------
+// doctor — quality rubric runner
+// ---------------------------------------------------------------------------
+
+async function cmdDoctor(args: string[]): Promise<void> {
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(
+      'gbrain skillpack doctor <pack-dir> [--quick|--full] [--fix] [--yes] [--json]\n\n' +
+        '  <pack-dir>   Path to the skillpack root (where skillpack.json lives)\n' +
+        '  --quick      Structural rubric (~5s, no sandbox/LLM/DB) — default\n' +
+        '  --full       Add publish-gate suite execution (lands in a follow-up wave)\n' +
+        '  --fix        Auto-scaffold missing pieces flagged auto_fixable=true\n' +
+        '  --yes        Skip confirm prompts (CI / unattended)\n' +
+        '  --json       Stable JSON envelope for agent consumption',
+    );
+    process.exit(0);
+  }
+  const json = args.includes('--json');
+  const fix = args.includes('--fix');
+  const yes = args.includes('--yes');
+  const mode = args.includes('--full') ? 'full' : 'quick';
+  let packDir: string | undefined;
+  for (const a of args) {
+    if (a && !a.startsWith('--') && !packDir) packDir = a;
+  }
+  if (!packDir) {
+    console.error('Error: pass the path to the pack root (where skillpack.json lives).');
+    process.exit(2);
+  }
+  const packRoot = resolveAbs(packDir);
+
+  const { runDoctor, formatDoctorResult } = await import('../core/skillpack/doctor.ts');
+  const result = await runDoctor({ packRoot, mode, fix, yes });
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(formatDoctorResult(result));
+  }
+
+  // Exit codes: 0 if score=10, 1 if 6-9, 2 if blocked/<5.
+  if (result.tier_eligibility === 'blocked' || result.score < 5) {
+    process.exit(2);
+  }
+  if (result.score < 10) process.exit(1);
+  process.exit(0);
 }
 
 // ---------------------------------------------------------------------------
