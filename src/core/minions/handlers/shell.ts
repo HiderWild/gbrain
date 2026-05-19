@@ -32,6 +32,7 @@ import type { MinionJobContext } from '../types.ts';
 import { UnrecoverableError } from '../types.ts';
 import { deriveEnvKey, resolveInheritValue } from './shell-inherit.ts';
 import { validateShellJobParams } from './shell-validate.ts';
+import { redactSecretsInText } from './shell-redact.ts';
 import { loadConfig } from '../../config.ts';
 
 /** Environment variables passed through to shell children by default. Callers
@@ -72,6 +73,15 @@ export interface ShellJobParams {
    * `src/core/minions/handlers/shell-inherit.ts` and `shell-validate.ts`.
    */
   inherit?: string[];
+  /**
+   * Opt-in (v0.36.5.0): scrub resolved `inherit:` values from
+   * `stdout_tail` / `stderr_tail` / `error_text` before persistence.
+   * Replacement token: `<REDACTED:name>`. Only `inherit:`-resolved values
+   * are scrubbed; caller-supplied `env:` values are not (those are the
+   * agent's "fine in the row" channel by design). Heuristic — defeats the
+   * common-case echo, not adversarial encode-then-print.
+   */
+  redact_secrets?: boolean;
 }
 
 export interface ShellJobResult {
@@ -213,6 +223,21 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
   //       fail-fast guard fires here on a worker that lost its DB URL after submit).
   const params = validateShellJobParams(ctx.data);
   const env = buildChildEnv(params.env, params.inherit);
+
+  // Build the redaction map: inherit-name → resolved value. The handler
+  // pays one extra loadConfig() to assemble this in one pass, separate from
+  // buildChildEnv's resolution. Cheap (single fs read; same call shape as
+  // buildChildEnv). Only populated when `redact_secrets` is true AND inherit
+  // has at least one entry.
+  const redactionMap = new Map<string, string>();
+  if (params.redact_secrets && params.inherit && params.inherit.length > 0) {
+    const cfg = loadConfig();
+    for (const name of params.inherit) {
+      const value = resolveInheritValue(cfg, name);
+      if (value !== undefined) redactionMap.set(name, value);
+    }
+  }
+
   const startedAt = Date.now();
 
   let proc: ChildProcess;
@@ -292,8 +317,18 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
   });
 
   const duration_ms = Date.now() - startedAt;
-  const stdout_tail = stdoutTail.done();
-  const stderr_tail = stderrTail.done();
+  // Assemble tails, then optionally scrub resolved inherit values out before
+  // any of these strings reach: (a) the throw's Error.message, which becomes
+  // `error_text` on the job row, OR (b) the result object, which is
+  // persisted to `minion_jobs.result`. Scrubbing happens AFTER tail
+  // assembly so a value split across multiple stdout chunks still gets
+  // caught (the final body is a single contiguous string by this point).
+  let stdout_tail = stdoutTail.done();
+  let stderr_tail = stderrTail.done();
+  if (redactionMap.size > 0) {
+    stdout_tail = redactSecretsInText(stdout_tail, redactionMap);
+    stderr_tail = redactSecretsInText(stderr_tail, redactionMap);
+  }
 
   // If we sent SIGTERM/SIGKILL in response to an abort, surface that as the
   // error rather than the exit code — clearer for debugging. Worker catch

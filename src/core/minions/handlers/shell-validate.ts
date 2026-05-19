@@ -42,6 +42,7 @@ export interface ValidatedShellJobParams {
   cwd: string;
   env?: Record<string, string>;
   inherit?: string[];
+  redact_secrets?: boolean;
 }
 
 export interface ValidateShellJobOpts {
@@ -161,11 +162,20 @@ export function validateShellJobParams(
     }
   }
 
+  // ---- `redact_secrets` shape check ----
+  if (data.redact_secrets !== undefined && typeof data.redact_secrets !== 'boolean') {
+    throw new UnrecoverableError(
+      'shell: redact_secrets must be a boolean if set ' +
+      '(see: docs/guides/minions-shell-jobs.md#secrets)',
+    );
+  }
+
   return {
     cmd: hasCmd ? (data.cmd as string) : undefined,
     argv: hasArgv ? (data.argv as string[]) : undefined,
     cwd: data.cwd as string,
     env: data.env as Record<string, string> | undefined,
     inherit,
+    redact_secrets: data.redact_secrets as boolean | undefined,
   };
 }

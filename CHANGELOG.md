@@ -44,7 +44,9 @@ The worker resolves each name from its config and injects values under the deriv
 - **`src/core/minions/handlers/shell-validate.ts`** (NEW) — `validateShellJobParams(data, opts?)` shared validator called pre-enqueue from both submit surfaces. Existing cmd/argv/cwd/env shape checks + new `inherit` shape check (array of snake_case strings) + fail-fast on missing config value. The test seam `opts.config` lets unit tests drive the validator hermetically.
 - **`src/commands/jobs.ts`** — `gbrain jobs submit shell` calls `validateShellJobParams(data)` before `queue.add()`. Audit-log call extends to record `inherit: [...]` names.
 - **`src/core/operations.ts`** — `submit_job` op for `name === 'shell'` runs the same pre-enqueue validator AND lifts the shell-audit JSONL write so the MCP-op path also produces audit lines (codex F-CDX-4).
-- **`src/core/minions/handlers/shell.ts`** — `ShellJobParams.inherit?: string[]`. `buildChildEnv` resolves names via `resolveInheritValue` and injects under `deriveEnvKey(name)`. Handler-entry re-validation as defense-in-depth catches pre-existing rows.
+- **`src/core/minions/handlers/shell.ts`** — `ShellJobParams.inherit?: string[]` + `ShellJobParams.redact_secrets?: boolean`. `buildChildEnv` resolves names via `resolveInheritValue` and injects under `deriveEnvKey(name)`. When `redact_secrets` is true, the handler builds a redaction map (inherit-name → value) and post-processes `stdout_tail` / `stderr_tail` via `redactSecretsInText` before throw/return. Handler-entry re-validation as defense-in-depth catches pre-existing rows.
+- **`src/core/minions/handlers/shell-redact.ts`** (NEW) — pure `redactSecretsInText(text, secrets)` helper. String-mode `replaceAll` so regex metacharacters in values are treated as literal (safety property). Empty values in the map are skipped.
+- **`src/commands/jobs.ts`** — CLI flag `--redact-secrets` merges `redact_secrets: true` into params before validation. Convenience for `gbrain jobs submit shell --redact-secrets`.
 - **`src/core/minions/handlers/shell-audit.ts`** — `ShellAuditEvent.inherit?: string[]` (names only).
 - **`src/core/config.ts`** — `ensureGitignore()` helper. Idempotent; never clobbers user content. Called from `saveConfig()`.
 - **`src/commands/upgrade.ts:runPostUpgrade`** — calls `ensureGitignore()` once per upgrade.
@@ -59,9 +61,32 @@ The worker resolves each name from its config and injects values under the deriv
   - `test/doctor-home-dir-in-worktree.test.ts` (5 cases) — walks dir-style + file-style `.git`, walk termination at $HOME, GBRAIN_HOME override.
   - `test/e2e/minions-shell-pglite.test.ts` (+2 cases) — full PGLite round-trip: `inherit: ["database_url"]` resolves into child env (negative-shape JSON assertion that value is NOT in row), AND a separate `inherit: ["anthropic_api_key"]` test proving the mechanism is genuinely free-form.
 
-### Honest scope — output-side leakage
+### Output-side redaction (opt-in)
 
-Codex's pre-landing review flagged that input-side closure is half the story. `inherit:` keeps the value out of `data.cmd`, `data.argv`, `data.env` (input fields). It does NOT scrub `result.stdout_tail`, `result.stderr_tail`, or `error_text` (output fields). If your script prints the value on success or on error, it lands in the row that way. Three rules: don't echo secrets, wrap noisy CLI tools to redact URLs on error, and inspect `gbrain jobs get <id>` after a failure to verify. Full guidance in `docs/guides/minions-shell-jobs.md#secrets`. A future PR may add an output-redaction pass; v0.36.5.0 names the boundary clearly.
+**`redact_secrets: true`** (or `--redact-secrets` on the CLI) opts into
+output-side scrubbing. When set, the worker resolves each `inherit:` name
+to a value, runs the child, then literal-string-replaces every occurrence
+of those values in `stdout_tail` / `stderr_tail` (and in the `error_text`
+derived from `stderr_tail` on non-zero exit) with `<REDACTED:name>` before
+persistence. Only `inherit:`-resolved values are scrubbed; caller-supplied
+`env:` values are not (those are the "I'm fine with this in the row" channel
+by design).
+
+```bash
+gbrain jobs submit shell --params '{
+  "cmd": "gbrain sync --skip-failed",
+  "cwd": "/data/gbrain",
+  "inherit": ["database_url"],
+  "redact_secrets": true
+}'
+```
+
+**Heuristic, not perfect.** Literal string-replace. A script that
+base64-encodes the secret before printing, or emits it one character at a
+time, bypasses the scrub. Those are adversarial shapes; the agent and the
+script are in the same trust domain, so this layer defends against
+accidental echo (the common case), not deliberate exfiltration. Default is
+`false` for back-compat — no behavior change for callers who don't opt in.
 
 ### For contributors
 

@@ -231,6 +231,145 @@ describe('E2E: Minions shell handler on PGLite (--follow inline path)', () => {
     }
   }, 30000);
 
+  test('v0.36.5.0: redact_secrets:true scrubs inherit values from stdout_tail', async () => {
+    // Honest defense for the documented output-side leakage: when the script
+    // echoes the inherited value, redact_secrets:true ensures the persisted
+    // result.stdout_tail carries the <REDACTED:name> token instead of the
+    // plaintext value. The agent opts in per-job; default is false (back-compat).
+    const { writeFileSync, mkdirSync, rmSync, existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+
+    const tmpHome = join(tmpdir(), `gbrain-redact-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(tmpHome, '.gbrain'), { recursive: true });
+    const fakeKey = 'sk-ant-FAKE-REDACT-E2E';
+    const fakeUrl = 'postgresql://user:R3DACT_ME@host:5432/redactdb';
+    writeFileSync(
+      join(tmpHome, '.gbrain', 'config.json'),
+      JSON.stringify({
+        engine: 'postgres',
+        database_url: fakeUrl,
+        anthropic_api_key: fakeKey,
+      }) + '\n',
+    );
+
+    const savedHome = process.env.GBRAIN_HOME;
+    const savedDbUrl = process.env.GBRAIN_DATABASE_URL;
+    const savedAnth = process.env.ANTHROPIC_API_KEY;
+    process.env.GBRAIN_HOME = tmpHome;
+    delete process.env.GBRAIN_DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    delete process.env.ANTHROPIC_API_KEY;
+
+    try {
+      const queue = new MinionQueue(engine);
+      const job = await queue.add(
+        'shell',
+        {
+          cmd: 'printenv GBRAIN_DATABASE_URL && printenv ANTHROPIC_API_KEY',
+          cwd: '/tmp',
+          inherit: ['database_url', 'anthropic_api_key'],
+          redact_secrets: true,
+        },
+        {},
+        { allowProtectedSubmit: true },
+      );
+
+      const worker = new MinionWorker(engine, { pollInterval: 100, lockDuration: 30000 });
+      await registerBuiltinHandlers(worker, engine);
+      const runPromise = worker.start();
+      try {
+        const status = await waitTerminal(queue, job.id, 20000);
+        expect(status).toBe('completed');
+        const final = await queue.getJob(job.id);
+        const stdoutTail = (final!.result as Record<string, unknown>).stdout_tail as string;
+        // The actual values must NOT appear in the persisted row.
+        expect(stdoutTail).not.toContain('R3DACT_ME');
+        expect(stdoutTail).not.toContain(fakeUrl);
+        expect(stdoutTail).not.toContain(fakeKey);
+        // Redaction tokens point at WHICH inherit name was scrubbed.
+        expect(stdoutTail).toContain('<REDACTED:database_url>');
+        expect(stdoutTail).toContain('<REDACTED:anthropic_api_key>');
+      } finally {
+        worker.stop();
+        await runPromise;
+      }
+    } finally {
+      if (savedHome === undefined) delete process.env.GBRAIN_HOME;
+      else process.env.GBRAIN_HOME = savedHome;
+      if (savedDbUrl === undefined) delete process.env.GBRAIN_DATABASE_URL;
+      else process.env.GBRAIN_DATABASE_URL = savedDbUrl;
+      if (savedAnth === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = savedAnth;
+      if (existsSync(tmpHome)) rmSync(tmpHome, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  test('v0.36.5.0: redact_secrets:false (default) does NOT scrub — back-compat', async () => {
+    // The previous tests already prove default behavior (no scrubbing) by
+    // asserting stdout_tail equals the literal URL when redact_secrets is
+    // absent. This case is the explicit-false twin: passing false should
+    // be identical to omitting.
+    const { writeFileSync, mkdirSync, rmSync, existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+
+    const tmpHome = join(tmpdir(), `gbrain-rd-off-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(tmpHome, '.gbrain'), { recursive: true });
+    const fakeUrl = 'postgresql://u:NO_REDACT@h:5432/nrdb';
+    writeFileSync(
+      join(tmpHome, '.gbrain', 'config.json'),
+      JSON.stringify({ engine: 'postgres', database_url: fakeUrl }) + '\n',
+    );
+
+    const savedHome = process.env.GBRAIN_HOME;
+    const savedDbUrl = process.env.GBRAIN_DATABASE_URL;
+    const savedPlainDbUrl = process.env.DATABASE_URL;
+    process.env.GBRAIN_HOME = tmpHome;
+    delete process.env.GBRAIN_DATABASE_URL;
+    delete process.env.DATABASE_URL;
+
+    try {
+      const queue = new MinionQueue(engine);
+      const job = await queue.add(
+        'shell',
+        {
+          cmd: 'printenv GBRAIN_DATABASE_URL',
+          cwd: '/tmp',
+          inherit: ['database_url'],
+          redact_secrets: false,
+        },
+        {},
+        { allowProtectedSubmit: true },
+      );
+
+      const worker = new MinionWorker(engine, { pollInterval: 100, lockDuration: 30000 });
+      await registerBuiltinHandlers(worker, engine);
+      const runPromise = worker.start();
+      try {
+        const status = await waitTerminal(queue, job.id, 20000);
+        expect(status).toBe('completed');
+        const final = await queue.getJob(job.id);
+        const stdoutTail = (final!.result as Record<string, unknown>).stdout_tail as string;
+        // Plaintext URL DOES appear when redact is off — back-compat with
+        // earlier inherit:["database_url"] tests in this file.
+        expect(stdoutTail).toBe(fakeUrl + '\n');
+        expect(stdoutTail).not.toContain('<REDACTED:');
+      } finally {
+        worker.stop();
+        await runPromise;
+      }
+    } finally {
+      if (savedHome === undefined) delete process.env.GBRAIN_HOME;
+      else process.env.GBRAIN_HOME = savedHome;
+      if (savedDbUrl === undefined) delete process.env.GBRAIN_DATABASE_URL;
+      else process.env.GBRAIN_DATABASE_URL = savedDbUrl;
+      if (savedPlainDbUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = savedPlainDbUrl;
+      if (existsSync(tmpHome)) rmSync(tmpHome, { recursive: true, force: true });
+    }
+  }, 30000);
+
   test('GBRAIN_ALLOW_SHELL_JOBS unset → shellHandler rejects at execution time', async () => {
     // v0.20.3+: shell handler is always registered (so claimed jobs emit a clear
     // rejection log), but the runtime env guard lives inside the handler itself.

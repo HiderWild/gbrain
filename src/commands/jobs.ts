@@ -126,6 +126,8 @@ USAGE
                             [--backoff-type fixed|exponential] [--backoff-delay Nms]
                             [--backoff-jitter 0..1] [--timeout-ms Nms]
                             [--idempotency-key K] [--queue Q] [--dry-run]
+                            [--redact-secrets]   (shell only; scrubs inherit
+                                                  values from stdout/stderr)
   gbrain jobs list [--status S] [--queue Q] [--limit N]
   gbrain jobs get <id>
   gbrain jobs cancel <id>
@@ -237,6 +239,12 @@ HANDLER TYPES (built in)
       const queueName = parseFlag(args, '--queue') ?? 'default';
       const dryRun = hasFlag(args, '--dry-run');
       const follow = hasFlag(args, '--follow');
+      // v0.36.5.0: --redact-secrets is a CLI convenience that merges
+      // `redact_secrets: true` into the params before validation. Equivalent
+      // to passing it in --params JSON; flag form is faster to type.
+      if (hasFlag(args, '--redact-secrets') && name.trim() === 'shell') {
+        data.redact_secrets = true;
+      }
 
       if (dryRun) {
         console.log(`[DRY RUN] Would submit job:`);

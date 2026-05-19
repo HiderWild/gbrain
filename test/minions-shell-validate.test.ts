@@ -194,6 +194,36 @@ describe('what the validator deliberately does NOT do (agency for the agent)', (
   });
 });
 
+describe('redact_secrets shape check', () => {
+  test('redact_secrets: true accepted', () => {
+    const p = validateShellJobParams(
+      { cmd: 'echo', cwd: '/tmp', inherit: ['database_url'], redact_secrets: true },
+      { config: fakeCfg },
+    );
+    expect(p.redact_secrets).toBe(true);
+  });
+  test('redact_secrets: false accepted', () => {
+    const p = validateShellJobParams(
+      { cmd: 'echo', cwd: '/tmp', redact_secrets: false },
+      { config: fakeCfg },
+    );
+    expect(p.redact_secrets).toBe(false);
+  });
+  test('redact_secrets: undefined is fine (default)', () => {
+    const p = validateShellJobParams(
+      { cmd: 'echo', cwd: '/tmp' },
+      { config: fakeCfg },
+    );
+    expect(p.redact_secrets).toBeUndefined();
+  });
+  test('redact_secrets: non-boolean rejected', () => {
+    expect(() => validateShellJobParams(
+      { cmd: 'echo', cwd: '/tmp', redact_secrets: 'yes' as unknown as boolean },
+      { config: fakeCfg },
+    )).toThrow(/redact_secrets must be a boolean/);
+  });
+});
+
 describe('T1 regression guard: validation runs BEFORE persistence', () => {
   // This test pins the load-bearing invariant codex caught: validation must
   // throw before any persistence call. If a future refactor moves the
