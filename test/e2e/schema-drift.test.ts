@@ -75,11 +75,18 @@ describe.skipIf(skip)('schema drift: PGLite ↔ Postgres post-initSchema parity 
     await pglite.connect({});
     await pglite.initSchema();
 
-    // Postgres side: connect to the test database, run the canonical initSchema.
-    // The test container at `bun run ci:local` provides a fresh DB; outside that
-    // path we rely on the caller having set DATABASE_URL to a fresh DB.
+    // Postgres side: ensure the test database is FRESH before initSchema.
+    // v0.37.0.1 fix: previously the test trusted the caller to pass a fresh
+    // DATABASE_URL, but `gbrain doctor` (used by the CLAUDE.md E2E bootstrap
+    // ritual) populates `content_chunks.model DEFAULT` from the configured
+    // gateway model. On a re-run, `CREATE TABLE IF NOT EXISTS` is a no-op so
+    // the stale default sticks while PGLite (always fresh-in-memory) gets the
+    // engine fallback. That produced a phantom drift unrelated to schema
+    // parity. Resetting public schema isolates the test from caller setup.
     pg = new PostgresEngine();
     await pg.connect({ database_url: DATABASE_URL! });
+    const pgConnPre = (pg as any).sql;
+    await pgConnPre.unsafe('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;');
     await pg.initSchema();
 
     // Snapshot both. PGLite returns `{rows}`, postgres.js returns the array.
