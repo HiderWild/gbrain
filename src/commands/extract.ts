@@ -77,7 +77,9 @@ export function walkMarkdownFiles(dir: string): { path: string; relPath: string 
       try {
         const st = lstatSync(full);
         if (st.isDirectory()) {
-          if (!pruneDir(entry)) continue;
+          // v0.37.7.0 #1169: pass parentDir so pruneDir can detect git
+          // submodule pointers (`.git` as a file inside the candidate).
+          if (!pruneDir(entry, d)) continue;
           walk(full);
         } else if (entry.endsWith('.md') && !entry.startsWith('_')) {
           const rel = relative(dir, full);
