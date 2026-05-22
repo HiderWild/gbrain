@@ -43,6 +43,12 @@ CREATE TABLE IF NOT EXISTS sources (
   archived            BOOLEAN NOT NULL DEFAULT false,
   archived_at         TIMESTAMPTZ,
   archive_expires_at  TIMESTAMPTZ,
+  -- v0.40.3.0: per-source CR mode override + mount-frontmatter trust gate.
+  -- contextual_retrieval_mode NULL = fall through to global mode bundle.
+  -- trust_frontmatter_overrides FALSE for mounts by default; host source
+  -- (id='default') is always trusted regardless of this column.
+  contextual_retrieval_mode   TEXT,
+  trust_frontmatter_overrides BOOLEAN NOT NULL DEFAULT false,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -104,6 +110,15 @@ CREATE TABLE IF NOT EXISTS pages (
   -- (NOT inside engine methods — internal callers must not pollute the
   -- signal). NULL = never retrieved (LSD prioritizes these first).
   last_retrieved_at     TIMESTAMPTZ,
+  -- v0.40.3.0 contextual retrieval (migration v81). contextual_retrieval_mode
+  -- is what tier the page was last embedded under (NULL = pre-v81 = treated as
+  -- 'none' for drift detection). corpus_generation is the composite hash of
+  -- (synopsis_prompt_version, haiku_model, title_wrapper_version,
+  -- embedding_model) — document-side provenance for query_cache invalidation
+  -- per D27 P1-5. NULL means pre-v81; the page_generations JSONB check
+  -- correctly invalidates pre-v81 cache rows against any current generation.
+  contextual_retrieval_mode  TEXT,
+  corpus_generation          TEXT,
   CONSTRAINT pages_source_slug_key UNIQUE (source_id, slug)
 );
 

@@ -107,6 +107,23 @@ export interface Page {
    * Test fixtures building synthetic Page rows must include this field.
    */
   source_id: string;
+  /**
+   * v0.40.3.0: which contextual retrieval tier the page was last embedded
+   * under. One of CRMode ('none' | 'title' | 'per_chunk_synopsis').
+   * NULL on pre-v81 rows; drift detection treats NULL as 'none' for
+   * reindex predicates, so unmigrated pages enter the sweep on first
+   * upgrade to non-conservative mode.
+   */
+  contextual_retrieval_mode?: CRMode | null;
+  /**
+   * v0.40.3.0: composite hash of
+   * (synopsis_prompt_version, haiku_model, title_wrapper_version,
+   *  embedding_model)
+   * captured at write time by `reembedPageWithContextualRetrieval`. Used
+   * by `query_cache.page_generations` for document-side cache invalidation
+   * per D27 P1-5. NULL on pre-v81 rows.
+   */
+  corpus_generation?: string | null;
 }
 
 export type EffectiveDateSource =
@@ -118,6 +135,27 @@ export type EffectiveDateSource =
 
 // `image` (v0.27.1): multimodal ingestion path, parallel to markdown + code.
 export type PageKind = 'markdown' | 'code' | 'image';
+
+/**
+ * v0.40.3.0 — contextual retrieval tier ladder per `search.mode`.
+ *
+ *   none                — no wrapper applied at embed time (conservative)
+ *   title               — `<context>{title}</context>\n{chunk}` (balanced)
+ *   per_chunk_synopsis  — per-chunk Haiku synopsis prepended (tokenmax)
+ *
+ * Resolution chain (highest wins): page frontmatter > source row > global
+ * mode bundle. Mount-frontmatter overrides are honored only when the
+ * source's `trust_frontmatter_overrides` flag is true (host source
+ * id='default' is always trusted). See
+ * `src/core/contextual-retrieval-resolver.ts`.
+ */
+export const CR_MODES = ['none', 'title', 'per_chunk_synopsis'] as const;
+export type CRMode = typeof CR_MODES[number];
+
+/** Type guard for parsing untrusted frontmatter / config values. */
+export function isCRMode(value: unknown): value is CRMode {
+  return typeof value === 'string' && (CR_MODES as readonly string[]).includes(value);
+}
 
 export interface PageInput {
   type: PageType;

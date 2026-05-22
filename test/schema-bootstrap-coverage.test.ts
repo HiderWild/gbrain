@@ -645,6 +645,13 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   'pages.source_path',
   'content_chunks.edges_backfilled_at',
   'query_cache.knobs_hash',
+  // v0.40.3.0 (migration v81) — query_cache is migration-only (added in
+  // v55), not in PGLITE_SCHEMA_SQL. The v81 ALTER TABLE query_cache ADD
+  // COLUMN page_generations runs after v55 in the migration sequence, so
+  // fresh installs get it correctly. No forward-reference exists for
+  // PGLITE_SCHEMA_SQL to trip on because query_cache isn't in the schema
+  // blob to begin with. Same exemption rationale as knobs_hash.
+  'query_cache.page_generations',
   // v0.35.6 (migration v67) — typed-claim columns + facts_typed_claim_idx
   // partial index are co-defined in the same migration, so the schema-blob
   // forward-reference path isn't tripped. Bootstrap is only required when an

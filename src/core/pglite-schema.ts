@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS sources (
   archived            BOOLEAN NOT NULL DEFAULT false,
   archived_at         TIMESTAMPTZ,
   archive_expires_at  TIMESTAMPTZ,
+  -- v0.40.3.0: per-source CR mode override + mount-frontmatter trust gate
+  -- (mirrors src/schema.sql). NULL falls through to global mode; trust
+  -- FALSE for mounts by default; host is always trusted regardless.
+  contextual_retrieval_mode   TEXT,
+  trust_frontmatter_overrides BOOLEAN NOT NULL DEFAULT false,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -85,6 +90,12 @@ CREATE TABLE IF NOT EXISTS pages (
   -- v0.37.0 (migration v79): real stale-page signal for gbrain lsd
   -- (mirrors src/schema.sql). NULL = never retrieved.
   last_retrieved_at     TIMESTAMPTZ,
+  -- v0.40.3.0 contextual retrieval (migration v81; mirrors src/schema.sql).
+  -- contextual_retrieval_mode is the tier the page was last embedded under;
+  -- corpus_generation is the composite document-side provenance hash used by
+  -- query_cache.page_generations invalidation.
+  contextual_retrieval_mode  TEXT,
+  corpus_generation          TEXT,
   CONSTRAINT pages_source_slug_key UNIQUE (source_id, slug)
 );
 
