@@ -107,6 +107,22 @@ export interface Page {
    * Test fixtures building synthetic Page rows must include this field.
    */
   source_id: string;
+
+  // v0.38.3.0 provenance read-path (WARN-8 + CV5). Migration v81 columns
+  // surfaced through getPage / list_pages so `gbrain call get_page | jq
+  // .source_kind` actually returns the value the put_page op wrote. NULL
+  // on historical pages that pre-date v0.38. Three-state read pattern
+  // (undefined: not in projection, null: column NULL, populated: real
+  // value) — matches the v0.26.5 deleted_at convention so SELECTs that
+  // don't project these columns continue to compile.
+  /** Ingestion-channel taxonomy. See PageInput.source_kind for the closed set. */
+  source_kind?: string | null;
+  /** Original URI/path/message-id the ingestion event carried. */
+  source_uri?: string | null;
+  /** Richer label paired with source_kind (often same value; indexable separately). */
+  ingested_via?: string | null;
+  /** Server-stamped first-write audit timestamp; CV12 COALESCE-preserved across edits. */
+  ingested_at?: Date | null;
 }
 
 export type EffectiveDateSource =
