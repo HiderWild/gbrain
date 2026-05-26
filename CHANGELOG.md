@@ -112,6 +112,117 @@ still warns about resolver health on bundled skills:
    - output of `gbrain check-resolvable --json`
    - which step broke
 
+## [0.41.13.0] - 2026-05-25
+
+**`gbrain sync` and `gbrain dream` stop lying about what they did.**
+
+Five real production bugs from one user's onboarding day (infiniteGameExp on PostgreSQL, foxhoundinc on a separate `gbrain dream` repro) all surfaced the same shape: gbrain told the user the operation succeeded when it didn't. `gbrain dream` exited 0 with every database phase silently skipped because the engine connection had thrown and the catch block ate the error. `gbrain sync` from a directory outside your vault routed every page to the literal source named `'default'` (which held zero pages) because the resolver didn't fire when you skipped `--source`. `gbrain sync` deleted your previously-indexed `learning/log.md` page on every re-sync because the cleanup loop didn't distinguish "user removed this file" from "this filename was always meant to be filtered." Two ingests of overlapping vault directories created two pages per file. A remote MCP client with `fuzzy: true` could see slug candidates from sources outside its access scope.
+
+This release fixes all five. If you upgrade and `gbrain doctor` shows your brain at the same score as before, you don't need to do anything — the fixes catch failure modes that were silent. The user-visible improvements you should notice:
+
+- `gbrain dream` against a broken DATABASE_URL now prints `[dream] WARNING: could not connect to DB (...)` to stderr, then runs filesystem-only phases honestly. No more guessing why your nightly cycle wrote nothing.
+- `gbrain sync` without `--source` on a brain that has one non-default source registered (the usual single-vault Obsidian / notes-folder shape) auto-routes to that source AND tells you it did. The first line on stderr will be `[gbrain] routing to source 'studiovault' (sole non-default source registered; pass --source to override).` Override with `--source default` if you actually meant `'default'`.
+- Indexed `log.md` / `schema.md` / `index.md` / `README.md` pages survive every re-sync.
+- Re-running `gbrain import` against an overlapping vault root no longer doubles your pages. Files with the same external `id:` (granola UUIDs, ULIDs) get an `[import] skipping ...` log; files with the same body text but different external IDs both index with an `[import] WARNING: ... shares content_hash` log so you can investigate.
+- MCP `get_page` with `fuzzy: true` on a remote-bound client only sees slug candidates from sources the client is scoped to. Closes a source-isolation gap in the fuzzy resolver that mirrored the v0.34.1 P0 seal for exact lookups.
+
+### How to turn it on
+
+`gbrain upgrade`. The new partial index `pages_dedup_idx` runs as migration v95 with `CREATE INDEX CONCURRENTLY` on Postgres so the migration is non-blocking; PGLite users get a plain `CREATE INDEX` (no concurrent writers exist there). To suppress the sole-non-default-source nudge in CI / cron scripts, set `GBRAIN_NO_SOLE_NON_DEFAULT_NUDGE=1`.
+
+### Numbers that matter
+
+| Bug class | Pre-fix | Post-fix |
+|---|---|---|
+| `gbrain dream` against bad DB | Silent skip, exit 0, no log line | Loud `[dream] WARNING` on stderr, filesystem phases still run, exit 0 |
+| `gbrain sync` on single-vault brain without `--source` | Routes to `'default'` (0 pages), createVersion 404s | Auto-routes to the registered vault source, prints nudge, succeeds |
+| Re-sync after editing `log.md` (or any other SYNC_SKIP_FILES basename) | Page deleted from index | Page survives indefinitely |
+| Overlapping ingest of same vault | 2 pages per file, identical content_hash + frontmatter.id | 1 page; second ingest logs `[import] skipping` |
+| MCP fuzzy `get_page` on federated client | Returns candidates from any source | Returns candidates only from sources in client's scope |
+
+### What's safe to know about
+
+- The `pages.frontmatter->>'id'` JSON path is now part of the identity signal for `findDuplicatePage`. Pages without a frontmatter `id:` fall back to content-hash-only matching with a WARN-not-SKIP posture — gbrain will never silently drop pages that share text but have no explicit external identifier.
+- Vector search now has a stable tiebreaker (`ORDER BY score DESC, page_id ASC, chunk_id ASC`) in both PGLite and Postgres. When two chunks tie on score, the older `page_id` wins; this was non-deterministic before. The eval-replay-gate test fixture relies on this for hermetic reproducibility — without the tiebreaker, adding any new index to the `pages` table could flip ranking on tied scores. v0.41.13 closes that fragility.
+- `gbrain sync` with `manifest.deleted` still doesn't delete `log.md`-class pages on physical `rm log.md`. That's a known limitation, NOT fixed by this wave — the cleanup guard only covers `manifest.modified`. Filed as v0.42+ TODO for a `gbrain pages remove <slug>` operator surface.
+- Issues #1437 (CLI source-id default) and #1435 (modified counter inflation) closed without code change: #1437 was already fixed in v0.41.8; #1435 needs a CLI-contract change for the human summary format and is deferred to v0.42+.
+
+### What we caught and fixed before merging
+
+Codex's outside-voice review of the original plan caught six load-bearing gaps that the engineering review missed. The original plan would have shipped:
+
+- The `sole_non_default` resolver tier as dead code (because `runSync` didn't call the resolver in the no-explicit-source case at `commands/sync.ts:1480`).
+- The MCP fuzzy `get_page` source-scope fix marked "likely already done in v0.41.8" — codex verified at the line numbers it was open.
+- The dedup pre-check failing OPEN on lookup error (silently masking the very bug it was meant to prevent) instead of failing CLOSED.
+- The dedup matching on content-hash alone, which would have silently dropped two intentional pages that share template text but have distinct external IDs.
+- The dedup query missing `deleted_at IS NULL`, which would have blocked legitimate re-imports after soft-delete.
+- The resolver tier placement contradiction (the plan said "5.5 before 5" AND "user who set sources.default still wins" — can't both be true).
+
+All six folded into the shipped wave per the codex consult on the plan file. The full plan + review trail at `~/.claude/plans/system-instruction-you-are-working-fluffy-ritchie.md`.
+
+### Itemized changes
+
+**Closes:** [#1422](https://github.com/garrytan/gbrain/issues/1422), [#1433](https://github.com/garrytan/gbrain/issues/1433), [#1434](https://github.com/garrytan/gbrain/issues/1434), [#1436](https://github.com/garrytan/gbrain/issues/1436), [#1309](https://github.com/garrytan/gbrain/issues/1309). Verified-fixed: [#1437](https://github.com/garrytan/gbrain/issues/1437) (closed). Deferred to v0.42+: [#1435](https://github.com/garrytan/gbrain/issues/1435) (closed with TODO), [#1432](https://github.com/garrytan/gbrain/issues/1432) (overlaps PR #1450 ze-switch), [#1438](https://github.com/garrytan/gbrain/issues/1438) (covered by PR #1440's `validateEmbeddingCreds()` preflight).
+
+**Reports:** infiniteGameExp's seven-issue triage on 2026-05-25 + foxhoundinc's #1422 separately. All from real production deployments hitting the bugs in the first 24 hours of use.
+
+#### `gbrain dream` no longer swallows engine-connect errors (#1422)
+
+`src/cli.ts:1063-1080` — bind the caught error and write a `[dream] WARNING:` line to stderr before falling through to filesystem-only phases. `runDream(null, ...)` still runs lint + backlinks + extract — no behavior change for the no-DB-by-design case. New test `test/cli-dream-engine-warn.test.ts` (2 cases) subprocess-runs the CLI against a bad DATABASE_URL and asserts the warning fires.
+
+#### Cleanup loop preserves indexed metafile pages on re-sync (#1433)
+
+`src/core/sync.ts:289-374` — `isSyncable` factored into a private `classifySync(path, opts): SyncableReason | null` helper that the public `isSyncable(p): boolean` AND the new `unsyncableReason(p): SyncableReason | null` both call. Single source of truth so they cannot drift. New `SYNC_SKIP_FILES` exported constant (the canonical four metafile basenames). New `SyncableReason` union type: `'metafile' | 'strategy' | 'pruned-dir' | 'include-glob-miss' | 'exclude-glob-hit'`.
+
+`src/commands/sync.ts:772` — cleanup loop guards on `unsyncableReason(path, syncOpts) === 'metafile'` before deleting a pre-existing page. A `log.md` that was indexed by an older gbrain version (or via direct `put_page`) now survives every subsequent `gbrain sync`.
+
+New tests: `test/sync-isSyncable-shape.test.ts` (15 cases pinning the duality contract + every reason variant) + `test/sync-metafile-skip.serial.test.ts` (3 PGLite cases: log.md survives re-sync, schema.md survives, AND a renamed-to-be-unsyncable `.md → .txt` IS still cleaned up so the guard is properly narrow).
+
+#### Resolver tier 5.5: `sole_non_default` + runSync rewiring (#1434)
+
+`src/core/source-resolver.ts:71-220` — new `pickSoleNonDefaultSource(engine)` private helper queries `SELECT id FROM sources WHERE local_path IS NOT NULL AND id != 'default' AND archived = false` and returns the id when exactly one row matches. Both `resolveSourceId` and `resolveSourceWithTier` route through it AFTER tier 5 (brain_default) so explicit user intent (`sources.default` config) wins. Archived sources excluded.
+
+`SOURCE_TIER_NAMES` extended to 7-entry tuple: `[flag, env, dotfile, local_path, brain_default, sole_non_default, seed_default]`. New exported `formatSoleNonDefaultNudge(sourceId): string | null` builds the user-facing nudge line; returns null when `GBRAIN_NO_SOLE_NON_DEFAULT_NUDGE=1` (CI / scripted-pipeline ergonomics).
+
+`src/commands/sync.ts:1497-1519` — `runSync` always calls `resolveSourceWithTier` (was: only when `--source` or `GBRAIN_SOURCE` was set). When the tier is `'sole_non_default'`, prints the nudge to stderr.
+
+`src/commands/import.ts:96-128` — same wiring on `gbrain import`. When `--source-id` AND `opts.sourceId` AND `GBRAIN_SOURCE` are ALL unset, the resolver fires; auto-route happens only when the tier is `'sole_non_default'` (preserves the v0.30.x explicit-only default for every other case).
+
+New tests: `test/source-resolver-sole-non-default.test.ts` (14 cases across the full 7-tier matrix + nudge formatter + env-suppress + archived-source-exclusion) + `test/sync-sole-non-default-routing.test.ts` (3 PGLite cases driving the actual `runSync` path with stderr capture: auto-route fires, explicit --source overrides, multi-source brains fall through to default with no nudge).
+
+Convention doc updated: `skills/conventions/brain-routing.md` now documents the 7-tier chain with the 5.5 placement rationale.
+
+#### `findDuplicatePage` with identity-based dedup (#1309)
+
+New `BrainEngine.findDuplicatePage?(sourceId, opts: {hash, frontmatterId?})` method (optional `?` so existing test doubles compile unchanged). Implemented on PGLite (`src/core/pglite-engine.ts:813`) and Postgres (`src/core/postgres-engine.ts:812`) with single-row `SELECT id, slug FROM pages WHERE source_id = $1 AND deleted_at IS NULL AND (content_hash = $2 OR (frontmatter->>'id' = $3 AND $3 IS NOT NULL)) ORDER BY id LIMIT 1`.
+
+`src/core/import-file.ts:427-490` — dedup pre-check fires AFTER the existing `getPage(slug)` short-circuit. Posture:
+- True duplicate (matching `frontmatter.id`): SKIP with `[import] skipping ...` log to stderr.
+- Same content_hash, different (or missing) `frontmatter.id`: WARN with `[import] WARNING: ... shares content_hash` log, BOTH pages index.
+- Lookup error: throw `[import] dedup pre-check failed for X: Y. Re-run import after DB recovery.` (FAIL CLOSED per codex review — silent fallthrough would mask the very bug this fix exists for).
+- `--force-rechunk`: bypasses the dedup check.
+
+New migration v95 `pages_dedup_partial_index`: `CREATE INDEX pages_dedup_idx ON pages (source_id, content_hash) WHERE deleted_at IS NULL` — Postgres path uses CONCURRENTLY with `transaction: false` + pre-drop of any invalid remnant from a prior failed attempt; PGLite uses plain CREATE INDEX.
+
+New tests: `test/import-dedup-frontmatter-id.test.ts` (11 cases: skip-on-match, warn-on-hash-collision, soft-delete excluded, no-frontmatter fallback, force-rechunk bypass, engine method shape + cross-source isolation).
+
+#### MCP fuzzy `get_page` honors source scope (#1436)
+
+`BrainEngine.resolveSlugs(partial, opts?: {sourceId?, sourceIds?})` signature extended. PGLite + Postgres both add a source filter to the exact AND fuzzy SQL paths when the opts are set; back-compatible no-opts path stays unscoped for internal CLI callers (`gbrain query --resolve`). Both paths also add `AND deleted_at IS NULL` so soft-deleted rows don't surface as fuzzy candidates.
+
+`src/core/operations.ts:475-485` — `get_page` op handler threads `sourceScopeOpts(ctx)` (the canonical helper for federated_read > scalar > nothing precedence) into the `resolveSlugs` call.
+
+New tests: `test/operations-fuzzy-source-scope.test.ts` (6 PGLite cases: scalar scope, federated array, back-compat, empty result for unmatched source, fuzzy match honors scope, soft-deleted excluded).
+
+#### Vector-search stable tiebreaker (regression guard for v95)
+
+`searchVector` in both engines: outer SELECT `ORDER BY score DESC` extended to `ORDER BY score DESC, page_id ASC, chunk_id ASC`. When two chunks tie on score (same source-prefix boost + same cosine distance, common in basis-vector eval fixtures), the older `page_id` wins. Without this, the planner's choice of join-driving index can flip ranking on tied scores between branches that add unrelated indexes to `pages`. This came up while running `test/eval-replay-gate.test.ts` after landing the v95 partial index; the tiebreaker pins ranking determinism going forward.
+
+#### Release process
+
+`gbrain upgrade` runs migration v95 automatically. The migration is `CREATE INDEX CONCURRENTLY` on Postgres so it doesn't block other writers; the index is small (`~MB` even on 100K-page brains) and the dedup query becomes O(log n).
+
+### To take advantage of v0.41.13.0
 ## [0.41.12.0] - 2026-05-25
 
 **`gbrain ze-switch` no longer silently breaks multimodal search on brains that mix text and image embeddings.**
@@ -506,6 +617,24 @@ Five agent-authored PRs (#1378–#1382) surfaced the design and the surrogate-pa
    ```bash
    gbrain apply-migrations --yes
    ```
+2. **Your agent reads `skills/conventions/brain-routing.md` the next time you interact with it** — the 7-tier chain is now documented there with the v0.41.13 `sole_non_default` placement rationale.
+3. **Verify the outcome:**
+   ```bash
+   # Confirm migration v95 ran
+   gbrain doctor --json | jq '.checks[] | select(.name=="schema_version")'
+   # Confirm the resolver picks up your single-source brain
+   gbrain sources current --json
+   # Smoke-test the dream warning
+   GBRAIN_DATABASE_URL=postgresql://wrong:wrong@localhost:9999/x gbrain dream --json 2>&1 | head -2
+   ```
+4. **If any step fails or the numbers look wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
+
    This applies schema migration v95 (widens the `link_source` CHECK to admit `'mentions'`).
 2. **Check your orphan ratio:**
    ```bash
