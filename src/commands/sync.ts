@@ -2375,17 +2375,24 @@ See also:
         // fall through to sync — no exit 2.
       } else {
         // Inline path: sync embeds synchronously with no backfill cap to
-        // protect it, so the blocking gate applies. New-content estimate =
-        // full-tree ceiling for changed sources (unchanged contribute 0) +
-        // stale backlog. Block only above the floor.
+        // protect it, so the blocking gate applies. The BLOCKING cost is the
+        // new-content estimate ONLY (full-tree ceiling for changed sources;
+        // unchanged contribute 0) — that's what this sync actually embeds.
+        // The pre-existing stale backlog (NULL embeddings + signature drift)
+        // is NOT swept by sync; `gbrain embed --stale` clears it. So we show
+        // it informationally but never gate on cost this sync won't incur
+        // (else a model swap would block the next inline cron — F2).
         const currentChunkerVersion = String(CHUNKER_VERSION);
         const inline = estimateInlineNewTokens(sources, currentChunkerVersion);
         const newCostUsd = estimateEmbeddingCostUsd(inline.tokens);
-        const costUsd = newCostUsd + staleCostUsd;
+        const costUsd = newCostUsd;
+        const staleNote = staleChars > 0
+          ? ` (plus ~${staleChars.toLocaleString()} stale-backlog chars pending \`gbrain embed --stale\`)`
+          : '';
         const previewMsg =
           `sync --all preview (inline embed): ${inline.changedSources} changed source(s), ` +
-          `${inline.unchangedSources} unchanged; ~${inline.tokens.toLocaleString()} new tokens + ` +
-          `~${staleChars.toLocaleString()} stale chars, est. $${costUsd.toFixed(2)} on ${embeddingModelName}.`;
+          `${inline.unchangedSources} unchanged; ~${inline.tokens.toLocaleString()} new tokens, ` +
+          `est. $${costUsd.toFixed(2)} on ${embeddingModelName}${staleNote}.`;
 
         if (dryRun) {
           if (jsonOut) {

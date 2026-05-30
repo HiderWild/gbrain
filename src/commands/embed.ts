@@ -378,6 +378,10 @@ async function embedPage(
   }));
 
   await engine.upsertChunks(slug, updated, opts);
+  // v0.41.30: stamp provenance so a later model/dims swap is detectable as
+  // stale. embedPage is the per-slug path used by `gbrain embed <slug>` AND
+  // by `gbrain sync`'s post-import embed step (runEmbedCore({slugs})).
+  await engine.setPageEmbeddingSignature(slug, { sourceId, signature: currentEmbeddingSignature() });
   result.embedded += toEmbed.length;
   result.pages_processed++;
   slog(`${slug}: embedded ${toEmbed.length} chunks`);
