@@ -1,8 +1,8 @@
 # TODOS
 
-## v0.41.30.0 retrieval-cathedral follow-ups (v0.42+)
+## v0.41.34.0 retrieval-cathedral follow-ups (v0.42+)
 
-Deferred from the v0.41.30.0 wave (codex adversarial P1/P2 — documented tradeoffs,
+Deferred from the v0.41.34.0 wave (codex adversarial P1/P2 — documented tradeoffs,
 not blockers; the P0 source-isolation issues were fixed in-wave).
 
 - [ ] **P1 — Calibrate the `evidence` classifier.** `high_vector_match` is assigned

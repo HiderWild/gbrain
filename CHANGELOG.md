@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.41.30.0] - 2026-05-30
+## [0.41.34.0] - 2026-05-30
 
 **Search now finds a page by its name, even when you only remember what you
 called it.** Ask for "Greek amphitheater" and the page you titled "The Mingtang —
@@ -41,7 +41,7 @@ retrieval regression shows up before you hit it in chat. And `gbrain eval
 retrieval-quality` is a CI gate (NamedThingBench) that fails any change which
 regresses name-based search.
 
-### To take advantage of v0.41.30.0
+### To take advantage of v0.41.34.0
 
 `gbrain upgrade` applies migrations v108 (page_aliases) and v109 (telemetry
 columns) automatically. If `gbrain doctor` warns about a partial migration:
