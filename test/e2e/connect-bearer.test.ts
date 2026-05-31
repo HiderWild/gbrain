@@ -13,7 +13,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { spawn, execFileSync, type ChildProcess } from 'child_process';
+import { spawn, spawnSync, execFileSync, type ChildProcess } from 'child_process';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -89,4 +89,78 @@ describe('connect bearer probe E2E (PGLite + real serve --http)', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(['unreachable', 'timeout']).toContain(r.reason);
   }, 15_000);
+
+  // -------------------------------------------------------------------------
+  // Real-CLI coverage: drive the actual `claude` / `codex` binaries through
+  // `gbrain connect --install` against the live server. Sandboxed via HOME /
+  // CODEX_HOME so the dev machine's real agent config is untouched. Skips
+  // gracefully when a binary isn't on PATH (e.g. CI without the CLIs).
+  // -------------------------------------------------------------------------
+
+  const hasBin = (b: string): boolean => {
+    try { execFileSync(b, ['--version'], { stdio: 'ignore' }); return true; } catch { return false; }
+  };
+  const HAS_CLAUDE = hasBin('claude');
+  const HAS_CODEX = hasBin('codex');
+
+  // Run `gbrain connect <args>` as a subprocess with extra env (HOME/CODEX_HOME
+  // sandbox + GBRAIN_REMOTE_TOKEN). spawnSync captures stderr too — connect's
+  // "Verified" / "Added" lines go to stderr.
+  const runConnectCli = (args: string[], extraEnv: Record<string, string>): { code: number; out: string } => {
+    const r = spawnSync('bun', ['run', 'src/cli.ts', 'connect', ...args], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: { ...process.env, GBRAIN_HOME: home, ...extraEnv },
+    });
+    return { code: r.status ?? 1, out: `${r.stdout ?? ''}\n${r.stderr ?? ''}` };
+  };
+
+  (HAS_CLAUDE ? test : test.skip)('claude-code --install registers + connects against the live server', () => {
+    expect(serverReady).toBe(true);
+    const claudeHome = mkdtempSync(join(tmpdir(), 'gb-claude-'));
+    try {
+      const r = runConnectCli([MCP_URL, '--token', token, '--install', '--yes'], { HOME: claudeHome });
+      expect(r.code).toBe(0);
+      expect(r.out).toMatch(/Verified/);
+      // The real `claude` CLI actually registered the server.
+      const got = spawnSync('claude', ['mcp', 'get', 'gbrain'], { encoding: 'utf8', env: { ...process.env, HOME: claudeHome } });
+      expect(got.status).toBe(0);
+      expect(`${got.stdout ?? ''}${got.stderr ?? ''}`).toContain(`:${PORT}/mcp`);
+    } finally {
+      try { spawnSync('claude', ['mcp', 'remove', 'gbrain'], { env: { ...process.env, HOME: claudeHome } }); } catch { /* best-effort */ }
+      rmSync(claudeHome, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  (HAS_CODEX ? test : test.skip)('codex --install registers the env-var bearer against the live server', () => {
+    expect(serverReady).toBe(true);
+    const codexHome = mkdtempSync(join(tmpdir(), 'gb-codex-'));
+    try {
+      const r = runConnectCli([MCP_URL, '--token', token, '--agent', 'codex', '--install', '--yes'], { CODEX_HOME: codexHome, GBRAIN_REMOTE_TOKEN: token });
+      expect(r.code).toBe(0);
+      expect(r.out).toMatch(/Verified/);
+      // The real `codex` CLI registered the streamable-http server with the
+      // env-var bearer — and the token never lands in Codex config.
+      const got = spawnSync('codex', ['mcp', 'get', 'gbrain'], { encoding: 'utf8', env: { ...process.env, CODEX_HOME: codexHome } });
+      expect(got.status).toBe(0);
+      const text = `${got.stdout ?? ''}${got.stderr ?? ''}`;
+      expect(text).toContain('GBRAIN_REMOTE_TOKEN');
+      expect(text).not.toContain(token);
+      expect(text).toContain(`:${PORT}/mcp`);
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // Perplexity Computer is a GUI connector (Settings → Connectors, Pro account):
+  // there is no CLI to wire E2E. We can only assert `connect` prints the exact
+  // values the user pastes into the GUI.
+  test('perplexity print mode yields the GUI connector values (no CLI to wire E2E)', () => {
+    expect(serverReady).toBe(true);
+    const r = runConnectCli([MCP_URL, '--token', token, '--agent', 'perplexity'], {});
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(`:${PORT}/mcp`);
+    expect(r.out).toContain(token); // print mode shows the token to paste into the connector
+    expect(r.out).toMatch(/Settings.+Connectors/);
+  }, 30_000);
 });
