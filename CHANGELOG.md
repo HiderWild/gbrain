@@ -4,10 +4,10 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.42.2.0] - 2026-05-30
 
-**One command now wires Claude Code to a remote gbrain when all you have is a
-bearer token. `gbrain connect <url> --token <tok>` prints a paste-ready block,
-or `--install` runs it for you and checks the token actually works before you
-walk away.**
+**One command now wires Claude Code, Codex, or Perplexity Computer to a remote
+gbrain when all you have is a bearer token. `gbrain connect <url> --token <tok>`
+prints a paste-ready block, or `--install` runs it for you and checks the token
+actually works before you walk away.**
 
 If your brain runs somewhere as an HTTP server (`gbrain serve --http`) and you
 have a token, connecting an agent used to mean remembering the exact
@@ -16,8 +16,19 @@ have a token, connecting an agent used to mean remembering the exact
 It normalizes the URL (adds `/mcp`, rejects a bare host so you don't silently
 point at the wrong thing), and the block it prints tells the agent to call
 `get_brain_identity` and `list_skills` so it immediately knows whose brain this
-is and everything it can do. No local brain, no proxy, no OAuth dance: Claude
-Code talks straight to your remote over HTTP.
+is and everything it can do. No local brain, no proxy, no OAuth dance: the agent
+talks straight to your remote over HTTP.
+
+Pick your agent with `--agent`:
+
+- **claude-code** (default): `claude mcp add ... -H "Authorization: Bearer ..."`.
+  `--install` runs it.
+- **codex**: `codex mcp add <name> --url <url> --bearer-token-env-var
+  GBRAIN_REMOTE_TOKEN`. Codex reads the token from the env var at runtime, so the
+  secret never lands in Codex's config file. `--install` runs it.
+- **perplexity**: prints the exact URL + token to paste into Perplexity's
+  Settings → Connectors (it's a GUI connector, so no `--install`).
+- **generic**: prints the URL + `Authorization` header for any other MCP client.
 
 How to use it (run anywhere gbrain is installed):
 
@@ -63,18 +74,24 @@ If anything looks wrong, `gbrain connect --help` lists every flag, and
 ### Itemized changes
 
 #### Added
-- **`gbrain connect <mcp-url>`** generates (or, with `--install`, runs) the
-  Claude Code MCP wiring for a remote gbrain from a bearer token. Flags:
-  `--token`, `--name`, `--agent claude-code|generic`, `--install`, `--yes`,
-  `--force`, `--json`, `--show-token`, `--timeout-ms`. Reads the token from
-  `--token` or `$GBRAIN_REMOTE_TOKEN`; in print mode the token is optional (it
-  emits a `<paste-your-token>` placeholder). Surfaced in `docs/mcp/CLAUDE_CODE.md`
-  (now leading with `gbrain connect` for the remote case, keeping the local
-  `gbrain serve` stdio path as the simplest local option) and the README.
+- **`gbrain connect <mcp-url>`** generates (or, with `--install`, runs) the MCP
+  wiring for a remote gbrain from a bearer token. Flags: `--token`, `--name`,
+  `--agent claude-code|codex|perplexity|generic`, `--install`, `--yes`, `--force`,
+  `--json`, `--show-token`, `--timeout-ms`. Reads the token from `--token` or
+  `$GBRAIN_REMOTE_TOKEN`; in print mode the token is optional (it emits a
+  `<paste-your-token>` placeholder).
+- **Per-agent setup**: `--agent codex` emits `codex mcp add ... --bearer-token-env-var
+  GBRAIN_REMOTE_TOKEN` (token read from the env var at runtime, never written to
+  Codex config; `--install` runs it). `--agent perplexity` prints the URL + token
+  for Perplexity's Settings → Connectors GUI (no `--install`). `--agent generic`
+  prints the URL + `Authorization` header for any other MCP client. Docs:
+  `docs/mcp/CLAUDE_CODE.md` (leads with `gbrain connect`, keeps the local stdio
+  path), new `docs/mcp/CODEX.md`, updated `docs/mcp/PERPLEXITY.md`, and the README.
 - **`--install` smoke-tests the token.** After registering the server it makes a
   real `get_brain_identity` call over the bearer connection and warns loudly on
   a 401, unreachable host, or timeout, so a bad token fails at setup instead of
-  on the agent's first request.
+  on the agent's first request. Supported for claude-code and codex (Perplexity
+  is GUI-only).
 
 #### Fixed
 - **`gbrain auth create <name>` no longer drops the name.** On the bare form

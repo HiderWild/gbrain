@@ -2,6 +2,18 @@
 
 Perplexity Computer supports remote MCP servers with bearer token authentication.
 
+## Fastest path: `gbrain connect`
+
+Run anywhere `gbrain` is installed to get the exact connector values to paste:
+
+```bash
+gbrain auth create "perplexity"
+gbrain connect https://YOUR-DOMAIN.ngrok.app/mcp --token gbrain_xxx --agent perplexity
+```
+
+Perplexity is a GUI connector, so there's no `--install` — `gbrain connect` prints
+the URL + token to paste into Settings → Connectors (the manual steps below).
+
 ## Setup
 
 1. Open Perplexity (requires Pro subscription)
