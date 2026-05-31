@@ -1,0 +1,474 @@
+import { test, expect, describe } from 'bun:test';
+import {
+  normalizeMcpUrl,
+  validateToken,
+  resolveToken,
+  isValidName,
+  buildClaudeMcpAddArgv,
+  claudeMcpAddCmdString,
+  redactToken,
+  buildConnectBlock,
+  buildJson,
+  runConnect,
+  type ConnectDeps,
+  ENV_VAR,
+  PLACEHOLDER_TOKEN,
+  REDACTED,
+  LEARN_INSTRUCTION,
+} from '../src/commands/connect.ts';
+import {
+  classifyProbeError,
+  extractResultText,
+  probeBrainIdentity,
+  type ProbeDeps,
+} from '../src/core/connect-probe.ts';
+
+describe('normalizeMcpUrl', () => {
+  test('bare host:port is rejected with a scheme hint', () => {
+    const r = normalizeMcpUrl('brain.example.com:3131');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/https:\/\/brain\.example\.com:3131/);
+  });
+
+  test('localhost:port (no scheme) is rejected too', () => {
+    expect(normalizeMcpUrl('localhost:3131').ok).toBe(false);
+  });
+
+  test('https host without path appends /mcp', () => {
+    const r = normalizeMcpUrl('https://brain.example.com:3131');
+    expect(r).toEqual({ ok: true, url: 'https://brain.example.com:3131/mcp' });
+  });
+
+  test('existing /mcp is not doubled', () => {
+    const r = normalizeMcpUrl('https://brain.example.com/mcp');
+    expect(r).toEqual({ ok: true, url: 'https://brain.example.com/mcp' });
+  });
+
+  test('trailing slash on /mcp/ is tolerated', () => {
+    const r = normalizeMcpUrl('https://brain.example.com/mcp/');
+    expect(r).toEqual({ ok: true, url: 'https://brain.example.com/mcp' });
+  });
+
+  test('root path becomes /mcp', () => {
+    const r = normalizeMcpUrl('https://brain.example.com/');
+    expect(r).toEqual({ ok: true, url: 'https://brain.example.com/mcp' });
+  });
+
+  test('uppercase scheme/host + /MCP normalize to lowercase canonical', () => {
+    const r = normalizeMcpUrl('HTTPS://Brain.Example.COM/MCP');
+    expect(r).toEqual({ ok: true, url: 'https://brain.example.com/mcp' });
+  });
+
+  test('a non-/mcp base path errors and suggests the full URL', () => {
+    const r = normalizeMcpUrl('https://brain.example.com/gbrain');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/\/gbrain\/mcp/);
+  });
+
+  test('credentials in the URL are rejected', () => {
+    expect(normalizeMcpUrl('https://user:pass@brain.example.com/mcp').ok).toBe(false);
+  });
+
+  test('query strings are rejected', () => {
+    expect(normalizeMcpUrl('https://brain.example.com/mcp?key=1').ok).toBe(false);
+  });
+
+  test('fragment is stripped', () => {
+    const r = normalizeMcpUrl('https://brain.example.com/mcp#frag');
+    expect(r).toEqual({ ok: true, url: 'https://brain.example.com/mcp' });
+  });
+
+  test('non-http scheme is rejected', () => {
+    expect(normalizeMcpUrl('ftp://brain.example.com/mcp').ok).toBe(false);
+  });
+
+  test('http on a non-local host warns about plaintext token', () => {
+    const r = normalizeMcpUrl('http://brain.example.com/mcp');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.warning).toMatch(/unencrypted/i);
+  });
+
+  test('http on localhost does not warn', () => {
+    const r = normalizeMcpUrl('http://localhost:3131/mcp');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.warning).toBeUndefined();
+  });
+
+  test('empty input errors', () => {
+    expect(normalizeMcpUrl('').ok).toBe(false);
+  });
+});
+
+describe('validateToken', () => {
+  test('accepts a normal token', () => {
+    expect(validateToken('gbrain_abc123').ok).toBe(true);
+  });
+  test('rejects empty', () => {
+    expect(validateToken('').ok).toBe(false);
+    expect(validateToken('   ').ok).toBe(false);
+  });
+  test('rejects whitespace (newline = header injection)', () => {
+    expect(validateToken('abc\ndef').ok).toBe(false);
+    expect(validateToken('abc def').ok).toBe(false);
+    expect(validateToken('abc\tdef').ok).toBe(false);
+  });
+  test('rejects control characters', () => {
+    expect(validateToken('abc\x00def').ok).toBe(false);
+  });
+});
+
+describe('resolveToken', () => {
+  test('--token flag wins', () => {
+    expect(resolveToken({ tokenFlag: 'tok', env: 'envtok', mode: 'print' })).toEqual({ kind: 'literal', token: 'tok' });
+  });
+  test('env used when no flag', () => {
+    expect(resolveToken({ tokenFlag: null, env: 'envtok', mode: 'install' })).toEqual({ kind: 'literal', token: 'envtok' });
+  });
+  test('print mode without token returns placeholder', () => {
+    expect(resolveToken({ tokenFlag: null, env: null, mode: 'print' })).toEqual({ kind: 'placeholder' });
+  });
+  test('install mode without token errors with a gbrain auth create hint', () => {
+    const r = resolveToken({ tokenFlag: null, env: null, mode: 'install' });
+    expect(r.kind).toBe('error');
+    if (r.kind === 'error') {
+      expect(r.error).toMatch(/gbrain auth create/);
+      expect(r.error).toMatch(ENV_VAR);
+    }
+  });
+  test('invalid token errors even in print mode', () => {
+    expect(resolveToken({ tokenFlag: 'bad tok', env: null, mode: 'print' }).kind).toBe('error');
+  });
+});
+
+describe('isValidName', () => {
+  test('accepts conservative identifiers', () => {
+    expect(isValidName('gbrain')).toBe(true);
+    expect(isValidName('team-brain_2')).toBe(true);
+  });
+  test('rejects bad names', () => {
+    expect(isValidName('-leading')).toBe(false);
+    expect(isValidName('Has Space')).toBe(false);
+    expect(isValidName('UPPER')).toBe(false);
+    expect(isValidName('')).toBe(false);
+    expect(isValidName('semi;colon')).toBe(false);
+  });
+});
+
+describe('argv + command string', () => {
+  test('argv shape', () => {
+    expect(buildClaudeMcpAddArgv({ name: 'gbrain', url: 'https://h/mcp', headerToken: 'TOK' })).toEqual([
+      'mcp', 'add', 'gbrain', '-t', 'http', 'https://h/mcp', '-H', 'Authorization: Bearer TOK',
+    ]);
+  });
+  test('command string double-quotes the header', () => {
+    const cmd = claudeMcpAddCmdString(buildClaudeMcpAddArgv({ name: 'gbrain', url: 'https://h/mcp', headerToken: 'TOK' }));
+    expect(cmd).toBe('claude mcp add gbrain -t http https://h/mcp -H "Authorization: Bearer TOK"');
+  });
+});
+
+describe('redactToken', () => {
+  test('replaces every occurrence', () => {
+    expect(redactToken('a TOK b TOK', 'TOK')).toBe(`a ${REDACTED} b ${REDACTED}`);
+  });
+  test('null token is a no-op', () => {
+    expect(redactToken('unchanged', null)).toBe('unchanged');
+  });
+});
+
+describe('buildConnectBlock', () => {
+  test('claude-code with a literal token inlines it + learn instruction', () => {
+    const block = buildConnectBlock({ agent: 'claude-code', name: 'gbrain', url: 'https://h/mcp', token: 'TOK' });
+    expect(block).toContain('claude mcp add gbrain -t http https://h/mcp -H "Authorization: Bearer TOK"');
+    expect(block).toContain(LEARN_INSTRUCTION);
+    expect(block).not.toContain(PLACEHOLDER_TOKEN);
+    expect(block).toMatch(/long-lived, full-access secret/);
+  });
+  test('claude-code without a token emits a placeholder + replace hint', () => {
+    const block = buildConnectBlock({ agent: 'claude-code', name: 'gbrain', url: 'https://h/mcp', token: null });
+    expect(block).toContain(PLACEHOLDER_TOKEN);
+    expect(block).toMatch(/gbrain auth create/);
+  });
+  test('generic agent emits URL + header lines, no claude command', () => {
+    const block = buildConnectBlock({ agent: 'generic', name: 'gbrain', url: 'https://h/mcp', token: 'TOK' });
+    expect(block).toContain('URL:    https://h/mcp');
+    expect(block).toContain('Authorization: Bearer TOK');
+    expect(block).not.toContain('claude mcp add');
+    expect(block).toContain(LEARN_INSTRUCTION);
+  });
+});
+
+describe('buildJson', () => {
+  test('redacts the token by default', () => {
+    const j = buildJson({ url: 'https://h/mcp', name: 'gbrain', agent: 'claude-code', token: 'SeKrEt9', showToken: false });
+    expect(j.token_present).toBe(true);
+    expect(j.token_redacted).toBe(true);
+    expect(j.env_var).toBe(ENV_VAR);
+    expect(JSON.stringify(j)).not.toContain('SeKrEt9');
+    expect(JSON.stringify(j)).toContain(REDACTED);
+  });
+  test('--show-token reveals the literal token', () => {
+    const j = buildJson({ url: 'https://h/mcp', name: 'gbrain', agent: 'claude-code', token: 'SeKrEt9', showToken: true });
+    expect(j.token_redacted).toBe(false);
+    expect(JSON.stringify(j)).toContain('Authorization: Bearer SeKrEt9');
+  });
+  test('no token → placeholder, token_present false', () => {
+    const j = buildJson({ url: 'https://h/mcp', name: 'gbrain', agent: 'claude-code', token: null, showToken: false });
+    expect(j.token_present).toBe(false);
+    expect(JSON.stringify(j)).toContain(PLACEHOLDER_TOKEN);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// connect-probe
+// ---------------------------------------------------------------------------
+
+describe('classifyProbeError', () => {
+  test('timeout/abort', () => {
+    expect(classifyProbeError('timeout after 15000ms')).toBe('timeout');
+    expect(classifyProbeError('The operation was aborted')).toBe('timeout');
+  });
+  test('auth', () => {
+    expect(classifyProbeError('HTTP 401 Unauthorized')).toBe('auth');
+    expect(classifyProbeError('403 forbidden')).toBe('auth');
+  });
+  test('unreachable', () => {
+    expect(classifyProbeError('fetch failed')).toBe('unreachable');
+    expect(classifyProbeError('getaddrinfo ENOTFOUND brain.example.com')).toBe('unreachable');
+    expect(classifyProbeError('connect ECONNREFUSED 127.0.0.1:3131')).toBe('unreachable');
+    // MCP SDK / undici friendly wrapper for a refused connection.
+    expect(classifyProbeError('Unable to connect. Is the computer able to access the url?')).toBe('unreachable');
+  });
+  test('unknown fallback', () => {
+    expect(classifyProbeError('something weird')).toBe('unknown');
+  });
+});
+
+describe('extractResultText', () => {
+  test('joins text content entries', () => {
+    expect(extractResultText([{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }])).toBe('a\nb');
+  });
+  test('non-array → empty', () => {
+    expect(extractResultText(null)).toBe('');
+    expect(extractResultText({})).toBe('');
+  });
+});
+
+describe('probeBrainIdentity (injected deps)', () => {
+  test('ok result extracts identity text', async () => {
+    const deps: ProbeDeps = {
+      connectAndCall: async () => ({ content: [{ type: 'text', text: 'brain: alice-example' }] }),
+    };
+    const r = await probeBrainIdentity('https://h/mcp', 'TOK', { deps });
+    expect(r).toEqual({ ok: true, identity: 'brain: alice-example' });
+  });
+  test('isError with 401 → auth', async () => {
+    const deps: ProbeDeps = {
+      connectAndCall: async () => ({ isError: true, content: [{ type: 'text', text: 'HTTP 401' }] }),
+    };
+    const r = await probeBrainIdentity('https://h/mcp', 'TOK', { deps });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('auth');
+  });
+  test('thrown ENOTFOUND → unreachable', async () => {
+    const deps: ProbeDeps = {
+      connectAndCall: async () => { throw new Error('getaddrinfo ENOTFOUND h'); },
+    };
+    const r = await probeBrainIdentity('https://h/mcp', 'TOK', { deps });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('unreachable');
+  });
+  test('isError with a non-auth message → tool_error', async () => {
+    const deps: ProbeDeps = {
+      connectAndCall: async () => ({ isError: true, content: [{ type: 'text', text: 'tool blew up: bad arguments' }] }),
+    };
+    const r = await probeBrainIdentity('https://h/mcp', 'TOK', { deps });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('tool_error');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runConnect orchestrator (install path) — inject deps, stub process.exit
+// ---------------------------------------------------------------------------
+
+function captureConsole() {
+  const out: string[] = [];
+  const err: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  console.log = (...a: unknown[]) => { out.push(a.join(' ')); };
+  console.error = (...a: unknown[]) => { err.push(a.join(' ')); };
+  return {
+    out, err,
+    restore() { console.log = origLog; console.error = origErr; },
+  };
+}
+
+async function runWithExitCapture(args: string[], deps: ConnectDeps): Promise<{ exitCode?: number; out: string[]; err: string[] }> {
+  const cap = captureConsole();
+  const origExit = process.exit;
+  let exitCode: number | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  process.exit = ((c?: number) => { exitCode = c ?? 0; throw new Error('__EXIT__'); }) as any;
+  try {
+    await runConnect(args, deps);
+  } catch (e) {
+    if ((e as Error).message !== '__EXIT__') { cap.restore(); process.exit = origExit; throw e; }
+  } finally {
+    cap.restore();
+    process.exit = origExit;
+  }
+  return { exitCode, out: cap.out, err: cap.err };
+}
+
+function installDeps(over: Partial<ConnectDeps> = {}): ConnectDeps {
+  return {
+    isTTY: () => false,
+    promptYesNo: async () => true,
+    hasClaude: () => true,
+    runClaude: (argv) => (argv[1] === 'get' ? { code: 1, stdout: '', stderr: '' } : { code: 0, stdout: '', stderr: '' }),
+    probe: async () => ({ ok: true, identity: 'brain: alice-example' }),
+    ...over,
+  };
+}
+
+describe('runConnect --install', () => {
+  test('happy path: adds server, verifies, prints learn instruction', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'gbrain_tok', '--install', '--yes'],
+      installDeps(),
+    );
+    expect(r.exitCode).toBeUndefined();
+    expect(r.err.join('\n')).toMatch(/Added MCP server 'gbrain'/);
+    expect(r.err.join('\n')).toMatch(/Verified/);
+    expect(r.err.join('\n')).toContain(LEARN_INSTRUCTION);
+  });
+
+  test('probe failure warns + exits 1 + never echoes the token', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'gbrain_secret', '--install', '--yes'],
+      installDeps({ probe: async () => ({ ok: false, reason: 'auth', message: 'HTTP 401 for gbrain_secret' }) }),
+    );
+    expect(r.exitCode).toBe(1);
+    const all = [...r.out, ...r.err].join('\n');
+    expect(all).toMatch(/did not verify \(auth\)/);
+    expect(all).not.toContain('gbrain_secret');
+    expect(all).toContain(REDACTED);
+  });
+
+  test('missing claude binary fails fast', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'tok', '--install', '--yes'],
+      installDeps({ hasClaude: () => false }),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.err.join('\n')).toMatch(/not found on PATH/);
+  });
+
+  test('existing server name without --force is refused', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'tok', '--install', '--yes'],
+      installDeps({ runClaude: () => ({ code: 0, stdout: '', stderr: '' }) }), // get returns 0 → exists
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.err.join('\n')).toMatch(/already exists/);
+  });
+
+  test('install without a token errors with the auth-create hint', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--install', '--yes'],
+      installDeps(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.err.join('\n')).toMatch(/gbrain auth create/);
+  });
+
+  test('--force replaces an existing server then verifies', async () => {
+    const calls: string[][] = [];
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'tok', '--install', '--yes', '--force'],
+      installDeps({
+        runClaude: (argv) => { calls.push(argv); return { code: 0, stdout: '', stderr: '' }; }, // get→0 (exists), remove→0, add→0
+      }),
+    );
+    expect(r.exitCode).toBeUndefined();
+    expect(calls.some((a) => a[1] === 'remove')).toBe(true);
+    expect(calls.some((a) => a[1] === 'add')).toBe(true);
+    expect(r.err.join('\n')).toMatch(/Added MCP server/);
+  });
+
+  test('--force remove failure aborts + redacts the token', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'gbrain_secret', '--install', '--yes', '--force'],
+      installDeps({
+        runClaude: (argv) => (argv[1] === 'remove'
+          ? { code: 1, stdout: '', stderr: 'remove failed near gbrain_secret' }
+          : { code: 0, stdout: '', stderr: '' }),
+      }),
+    );
+    expect(r.exitCode).toBe(1);
+    const all = [...r.out, ...r.err].join('\n');
+    expect(all).toMatch(/Could not replace/);
+    expect(all).not.toContain('gbrain_secret');
+  });
+
+  test('claude mcp add failure aborts + redacts the token', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'gbrain_secret', '--install', '--yes'],
+      installDeps({
+        runClaude: (argv) => (argv[1] === 'add'
+          ? { code: 1, stdout: '', stderr: 'add blew up with gbrain_secret' }
+          : { code: 1, stdout: '', stderr: '' }), // get→1 (not exists)
+      }),
+    );
+    expect(r.exitCode).toBe(1);
+    const all = [...r.out, ...r.err].join('\n');
+    expect(all).toMatch(/'claude mcp add' failed/);
+    expect(all).not.toContain('gbrain_secret');
+  });
+
+  test('TTY prompt decline aborts without adding', async () => {
+    const calls: string[][] = [];
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'tok', '--install'], // no --yes, TTY on
+      installDeps({
+        isTTY: () => true,
+        promptYesNo: async () => false,
+        runClaude: (argv) => { calls.push(argv); return { code: argv[1] === 'get' ? 1 : 0, stdout: '', stderr: '' }; },
+      }),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.err.join('\n')).toMatch(/Aborted/);
+    expect(calls.some((a) => a[1] === 'add')).toBe(false);
+  });
+
+  test('--install with --agent generic is rejected', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'tok', '--install', '--yes', '--agent', 'generic'],
+      installDeps(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.err.join('\n')).toMatch(/only supports --agent claude-code/);
+  });
+});
+
+describe('runConnect print mode', () => {
+  test('prints the block to stdout with the literal token', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'gbrain_tok'],
+      installDeps(),
+    );
+    expect(r.exitCode).toBeUndefined();
+    expect(r.out.join('\n')).toContain('claude mcp add gbrain -t http https://brain.example.com/mcp -H "Authorization: Bearer gbrain_tok"');
+  });
+
+  test('--json redacts the token', async () => {
+    const r = await runWithExitCapture(
+      ['https://brain.example.com/mcp', '--token', 'gbrain_secret', '--json'],
+      installDeps(),
+    );
+    const j = JSON.parse(r.out.join('\n'));
+    expect(j.token_redacted).toBe(true);
+    expect(r.out.join('\n')).not.toContain('gbrain_secret');
+  });
+});
